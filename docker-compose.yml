@@ -1,0 +1,26 @@
+version: '3.9'
+
+services:
+  veritex-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_YJS_WS_URL=ws://localhost:1234
+    restart: unless-stopped
+
+  veritex-collab-relay:
+    image: node:22-alpine
+    working_dir: /app
+    command: npx @hocuspocus/cli --port 1234 --sqlite /data/veritex-crdt.sqlite
+    ports:
+      - "1234:1234"
+    volumes:
+      - veritex_crdt_data:/data
+    restart: unless-stopped
+
+volumes:
+  veritex_crdt_data:

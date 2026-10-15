@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper-bg: #ffffff;
+  --paper-fg: #111827;
+  --paper-border: #d1d5db;
+  --paper-subtle: #f8fafc;
+}
+
+.paper-theme-white {
+  --paper-bg: #ffffff;
+  --paper-fg: #111827;
+  --paper-border: #d1d5db;
+  --paper-subtle: #f8fafc;
+}
+
+.paper-theme-ivory {
+  --paper-bg: #fbf8f1;
+  --paper-fg: #1f1d18;
+  --paper-border: #d6cebf;
+  --paper-subtle: #f3ede0;
+}
+
+.paper-theme-night {
+  --paper-bg: #13161c;
+  --paper-fg: #e5e7eb;
+  --paper-border: #2e3440;
+  --paper-subtle: #1c2029;
+}
+
+.veritex-paper-sheet {
+  background-color: var(--paper-bg);
+  color: var(--paper-fg);
+  font-family: 'Computer Modern Serif', Georgia, 'Times New Roman', serif;
+  line-height: 1.65;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.veritex-paper-sheet .veritex-theorem {
+  background-color: var(--paper-subtle);
+  border-color: var(--paper-fg);
+}
+
+.veritex-paper-sheet .veritex-table,
+.veritex-paper-sheet .veritex-algorithm,
+.veritex-paper-sheet header,
+.veritex-paper-sheet section,
+.veritex-paper-sheet .veritex-heading {
+  border-color: var(--paper-border);
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #veritex-printable-paper,
+  #veritex-printable-paper * {
+    visibility: visible;
+  }
+  #veritex-printable-paper {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    box-shadow: none !important;
+  }
+}
