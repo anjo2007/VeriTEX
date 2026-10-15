@@ -18,6 +18,7 @@ export interface VeriTeXProject {
 
 export type WorkbenchMode = 'focus' | 'studio' | 'diff';
 export type PaperTheme = 'white' | 'ivory' | 'night';
+export type SidebarTab = 'explorer' | 'outline' | 'citations' | 'symbols' | 'ai' | 'collab';
 
 export interface BibEntry {
   key: string;
@@ -47,13 +48,15 @@ export interface CompilationResult {
   macros: Record<string, { args: number; body: string }>;
   compileTimeMs: number;
   outline: Array<{ level: number; title: string; line: number; number: string }>;
+  wordCount: number;
 }
 
 export interface AutocompleteItem {
   label: string;
   insertText: string;
   detail: string;
-  kind: 'citation' | 'reference' | 'macro' | 'environment' | 'snippet';
+  documentation?: string;
+  kind: 'citation' | 'reference' | 'macro' | 'environment' | 'math' | 'command' | 'snippet';
 }
 
 export type AIProviderId = 'gemini' | 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'ollama';
@@ -64,8 +67,8 @@ export interface AIProviderConfig {
   apiKey: string;
   baseUrl: string;
   temperature: number;
-  useAstSlicer: boolean;
-  verifyCitations: boolean;
+  useAstSlicer?: boolean;
+  verifyCitations?: boolean;
 }
 
 export interface ASTContextSlice {

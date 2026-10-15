@@ -9,7 +9,12 @@ const config: Config = {
   ],
   darkMode: 'class',
   theme: {
-    extend: {},
+    extend: {
+      fontFamily: {
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        serif: ['"Computer Modern Serif"', 'Georgia', 'Cambria', '"Times New Roman"', 'serif'],
+      },
+    },
   },
   plugins: [],
 };

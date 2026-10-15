@@ -6,19 +6,12 @@ import {
   VirtualFile,
 } from '@/types/veritex';
 
-/**
- * Estimates token count (~4 characters per token for English + LaTeX markup)
- */
+
 export function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.max(1, Math.ceil(text.length / 3.8));
 }
 
-/**
- * Extracts only the active section/environment around the cursor plus dependent
- * preamble \newcommand macros, \label definitions, and \cite BibTeX entries.
- * Reduces prompt token usage by 80%-92% compared to sending full manuscripts.
- */
 export function sliceLatexASTContext(
   files: Record<string, VirtualFile>,
   activeFilePath: string,
@@ -40,7 +33,6 @@ export function sliceLatexASTContext(
     };
   }
 
-  // 1. Compute full project token footprint
   const fullProjectText = Object.values(files)
     .map((f) => f.content)
     .join('\n');
@@ -49,11 +41,10 @@ export function sliceLatexASTContext(
   const lines = activeFile.content.split('\n');
   const clampedLine = Math.max(0, Math.min(lines.length - 1, cursorLine - 1));
 
-  // 2. Find enclosing \section / \subsection boundary around cursorLine
   const sectionRegex = /^\\(section|subsection|subsubsection)\*?\{([^}]+)\}/;
   let startLine = 0;
   let endLine = lines.length - 1;
-  let activeSectionTitle = 'Preamble / Document Root';
+  let activeSectionTitle = 'Document Preamble';
 
   for (let i = clampedLine; i >= 0; i--) {
     const match = lines[i].match(sectionRegex);
@@ -64,7 +55,7 @@ export function sliceLatexASTContext(
     }
     if (lines[i].includes('\\begin{document}')) {
       startLine = i;
-      activeSectionTitle = 'Introduction / Top Matter';
+      activeSectionTitle = 'Abstract & Frontmatter';
       break;
     }
   }
@@ -76,7 +67,6 @@ export function sliceLatexASTContext(
     }
   }
 
-  // Cap slice window to at most 80 lines around the cursor if section is huge
   if (endLine - startLine > 80) {
     startLine = Math.max(startLine, clampedLine - 40);
     endLine = Math.min(endLine, clampedLine + 40);
@@ -84,7 +74,6 @@ export function sliceLatexASTContext(
 
   const activeBlockContent = lines.slice(startLine, endLine + 1).join('\n');
 
-  // 3. Collect all \newcommand / \DeclareMathOperator definitions across project
   const allMacroDefs: Record<string, string> = {};
   const macroDefRegex = /^\\(?:newcommand|renewcommand|DeclareMathOperator)\*?\{\\(\w+)\}.*$/gm;
 
@@ -97,16 +86,13 @@ export function sliceLatexASTContext(
     }
   });
 
-  // Only include macros that are actually used in the active block
   const extractedMacros: string[] = [];
   Object.entries(allMacroDefs).forEach(([macroName, fullDef]) => {
-    const usageRegex = new RegExp(`\\\\${macroName}\\b`);
-    if (usageRegex.test(activeBlockContent)) {
+    if (new RegExp(`\\\\${macroName}\\b`).test(activeBlockContent)) {
       extractedMacros.push(fullDef);
     }
   });
 
-  // 4. Resolve referenced \ref{...} or \eqref{...} inside the active slice
   const referencedLabels: string[] = [];
   const refMatches = Array.from(activeBlockContent.matchAll(/\\(?:eq)?ref\{([^}]+)\}/g));
   const targetLabels = new Set(refMatches.map((m) => m[1]));
@@ -118,11 +104,10 @@ export function sliceLatexASTContext(
       fLines.forEach((line, idx) => {
         targetLabels.forEach((lbl) => {
           if (line.includes(`\\label{${lbl}}`)) {
-            const ctxStart = Math.max(0, idx - 2);
-            const ctxEnd = Math.min(fLines.length - 1, idx + 2);
+            const s = Math.max(0, idx - 2);
+            const e = Math.min(fLines.length - 1, idx + 2);
             referencedLabels.push(
-              `% Context for \\label{${lbl}} (${file.path}:${idx + 1}):\n` +
-                fLines.slice(ctxStart, ctxEnd + 1).join('\n')
+              `% \\label{${lbl}} (${file.path}:${idx + 1}):\n` + fLines.slice(s, e + 1).join('\n')
             );
           }
         });
@@ -130,7 +115,6 @@ export function sliceLatexASTContext(
     });
   }
 
-  // 5. Resolve referenced \cite{...} keys from .bib files
   const relevantBibEntries: string[] = [];
   const citeMatches = Array.from(activeBlockContent.matchAll(/\\cite[a-zA-Z]*\{([^}]+)\}/g));
   const citedKeys = new Set<string>();
@@ -147,21 +131,19 @@ export function sliceLatexASTContext(
       citedKeys.forEach((key) => {
         const bibRegex = new RegExp(`@\\w+\\{\\s*${key}\\s*,[\\s\\S]*?\\n\\s*\\}`, 'i');
         const match = file.content.match(bibRegex);
-        if (match) {
-          relevantBibEntries.push(match[0]);
-        }
+        if (match) relevantBibEntries.push(match[0]);
       });
     });
   }
 
-  const combinedSlicePayload = [
+  const combinedPayload = [
     extractedMacros.join('\n'),
     referencedLabels.join('\n'),
     relevantBibEntries.join('\n'),
     activeBlockContent,
   ].join('\n');
 
-  const slicedTokens = estimateTokens(combinedSlicePayload);
+  const slicedTokens = estimateTokens(combinedPayload);
   const savingsPercent =
     fullDocumentTokens > 0
       ? Math.max(0, Math.min(98, Math.round(((fullDocumentTokens - slicedTokens) / fullDocumentTokens) * 100)))
@@ -181,10 +163,6 @@ export function sliceLatexASTContext(
   };
 }
 
-/**
- * Parses surgical SEARCH/REPLACE diff blocks from the AI response so the model
- * never has to regenerate untouched paragraphs.
- */
 export function parseSurgicalDiffs(aiResponse: string): SurgicalDiffPatch[] {
   const patches: SurgicalDiffPatch[] = [];
   const diffRegex =
@@ -198,20 +176,17 @@ export function parseSurgicalDiffs(aiResponse: string): SurgicalDiffPatch[] {
       id: `patch-${Date.now()}-${index}`,
       searchBlock: match[1].trim(),
       replaceBlock: match[2].trim(),
-      explanation: `Surgical AST patch #${index}`,
+      explanation: `Surgical AST Patch #${index}`,
       status: 'pending',
     });
   }
   return patches;
 }
 
-/**
- * Applies a single surgical SEARCH/REPLACE patch to a file's content.
- */
-export function applySurgicalPatch(source: string, patch: SurgicalDiffPatch): {
-  updatedSource: string;
-  applied: boolean;
-} {
+export function applySurgicalPatch(
+  source: string,
+  patch: SurgicalDiffPatch
+): { updatedSource: string; applied: boolean } {
   if (!patch.searchBlock) {
     return { updatedSource: source + '\n' + patch.replaceBlock, applied: true };
   }
@@ -224,17 +199,12 @@ export function applySurgicalPatch(source: string, patch: SurgicalDiffPatch): {
   return { updatedSource: source, applied: false };
 }
 
-/**
- * Deterministic (100% Non-AI) Language Server Autocomplete & Snippet Engine.
- * Triggered automatically as the user types in the editor—works even when AI is completely disabled.
- */
 export function getDeterministicCompletions(
   linePrefix: string,
   labels: Record<string, { number: string; type: string; line: number; file: string }>,
   bibEntries: Record<string, BibEntry>,
   macros: Record<string, { args: number; body: string }>
 ): { trigger: string; items: AutocompleteItem[] } | null {
-  // 1. Citation autocomplete: \cite{...
   const citeMatch = linePrefix.match(/\\cite[a-zA-Z]*\{([^}]*)$/);
   if (citeMatch) {
     const query = citeMatch[1].split(',').pop()?.trim().toLowerCase() || '';
@@ -248,13 +218,13 @@ export function getDeterministicCompletions(
       .map((b) => ({
         label: b.key,
         insertText: `${b.key}}`,
-        detail: `${b.author} (${b.year}) — ${b.title}`,
+        detail: `${b.author} (${b.year})`,
+        documentation: b.title,
         kind: 'citation',
       }));
     return { trigger: citeMatch[1], items };
   }
 
-  // 2. Cross-reference autocomplete: \ref{... or \eqref{...
   const refMatch = linePrefix.match(/\\(?:eq)?ref\{([^}]*)$/);
   if (refMatch) {
     const query = refMatch[1].toLowerCase();
@@ -263,51 +233,56 @@ export function getDeterministicCompletions(
       .map(([key, meta]) => ({
         label: key,
         insertText: `${key}}`,
-        detail: `${meta.type.toUpperCase()} #${meta.number} (${meta.file}:${meta.line})`,
+        detail: `${meta.type.toUpperCase()} #${meta.number}`,
+        documentation: `Defined in ${meta.file} at line ${meta.line}`,
         kind: 'reference',
       }));
     return { trigger: refMatch[1], items };
   }
 
-  // 3. Environment autocomplete: \begin{...
   const envMatch = linePrefix.match(/\\begin\{([a-zA-Z*]*)$/);
   if (envMatch) {
     const query = envMatch[1].toLowerCase();
     const environments = [
       {
         name: 'equation',
-        body: 'equation}\n  \\label{eq:name}\n  \n\\end{equation}',
+        body: 'equation}\n  \\label{eq:main}\n  \\mathcal{L}(\\theta) = \\frac{1}{N} \\sum_{i=1}^{N} \\ell(f_\\theta(x_i), y_i)\n\\end{equation}',
         desc: 'Numbered display equation',
       },
       {
         name: 'align',
-        body: 'align}\n  f(x) &= g(x) \\label{eq:align1} \\\\\n       &= h(x)\n\\end{align}',
+        body: 'align}\n  f(x) &= g(x) \\label{eq:step1} \\\\\n       &= h(x)\n\\end{align}',
         desc: 'Multi-line aligned equations',
       },
       {
         name: 'theorem',
-        body: 'theorem}[Main Bound]\n  \\label{thm:main}\n  Let $\\mathcal{M}$ be a compact Riemannian manifold...\n\\end{theorem}',
-        desc: 'Formal numbered Theorem environment',
+        body: 'theorem}[Convergence Bound]\n  \\label{thm:bound}\n  Let $\\mathcal{M}$ be a compact Riemannian manifold...\n\\end{theorem}',
+        desc: 'Numbered Theorem environment',
+      },
+      {
+        name: 'lemma',
+        body: 'lemma}[Spectral Stability]\n  \\label{lem:spectral}\n  For any orthogonal projection $P$...\n\\end{lemma}',
+        desc: 'Numbered Lemma environment',
       },
       {
         name: 'proof',
-        body: 'proof}\n  By applying Cauchy-Schwarz inequality...\n\\end{proof}',
-        desc: 'Mathematical proof block with QED tombstone',
+        body: 'proof}\n  By applying the Cauchy-Schwarz inequality, the bound follows immediately.\n\\end{proof}',
+        desc: 'Mathematical proof with QED tombstone',
       },
       {
         name: 'table',
-        body: 'table}[htbp]\n  \\centering\n  \\caption{Experimental performance comparison.}\n  \\label{tab:results}\n  \\begin{tabular}{lcc}\n    \\toprule\n    Method & Complexity & Score (\\%) \\\\\n    \\midrule\n    Baseline & $\\mathcal{O}(N^2)$ & 84.2 \\\\\n    VeriTeX (Ours) & $\\mathcal{O}(N \\log N)$ & \\textbf{94.8} \\\\\n    \\bottomrule\n  \\end{tabular}\n\\end{table}',
+        body: 'table}[htbp]\n  \\centering\n  \\caption{Empirical benchmark comparison.}\n  \\label{tab:results}\n  \\begin{tabular}{lcc}\n    \\toprule\n    Model & Complexity & Score (\\%) \\\\\n    \\midrule\n    Baseline & $\\mathcal{O}(N^2)$ & 82.4 \\\\\n    VeriTeX (Ours) & $\\mathcal{O}(N \\log N)$ & \\textbf{94.1} \\\\\n    \\bottomrule\n  \\end{tabular}\n\\end{table}',
         desc: 'Publication-ready Booktabs table',
       },
       {
-        name: 'figure',
-        body: 'figure}[htbp]\n  \\centering\n  \\includegraphics[width=0.8\\textwidth]{figure.png}\n  \\caption{System overview architecture.}\n  \\label{fig:arch}\n\\end{figure}',
-        desc: 'Figure float environment',
+        name: 'algorithm',
+        body: 'algorithm}\n  \\caption{Geodesic Spectral Projection}\n  \\label{alg:geodesic}\n  \\begin{algorithmic}\n    \\REQUIRE Input matrix $X \\in \\mathbb{R}^{N \\times d}$\n    \\ENSURE Orthogonal embedding $Y$\n    \\STATE Initialize $Y_0 \\leftarrow X$\n    \\RETURN $Y_T$\n  \\end{algorithmic}\n\\end{algorithm}',
+        desc: 'Algorithm pseudocode float',
       },
       {
-        name: 'algorithm',
-        body: 'algorithm}\n  \\caption{Iterative Spectral Optimization}\n  \\label{alg:main}\n  \\begin{algorithmic}\n    \\REQUIRE Input matrix $X \\in \\mathbb{R}^{n \\times d}$\n    \\ENSURE Orthogonal projection $Y$\n    \\STATE Initialize $Y_0 \\leftarrow X$\n    \\RETURN $Y_T$\n  \\end{algorithmic}\n\\end{algorithm}',
-        desc: 'Algorithm pseudocode block',
+        name: 'itemize',
+        body: 'itemize}\n  \\item First key contribution.\n  \\item Second theoretical guarantee.\n\\end{itemize}',
+        desc: 'Bulleted list environment',
       },
     ];
 
@@ -317,34 +292,46 @@ export function getDeterministicCompletions(
         label: `\\begin{${e.name}}`,
         insertText: e.body,
         detail: e.desc,
+        documentation: `\\begin{${e.body}`,
         kind: 'environment',
       }));
     return { trigger: envMatch[1], items };
   }
 
-  // 4. Fast LaTeX command & custom macro autocomplete: \...
-  const cmdMatch = linePrefix.match(/\\([a-zA-Z]{2,})$/);
+  const cmdMatch = linePrefix.match(/\\([a-zA-Z]{1,})$/);
   if (cmdMatch) {
     const query = cmdMatch[1].toLowerCase();
     const builtInCommands: AutocompleteItem[] = [
-      { label: '\\frac{a}{b}', insertText: 'frac{}{}', detail: 'Fraction expression', kind: 'snippet' },
-      { label: '\\sqrt{x}', insertText: 'sqrt{}', detail: 'Square root', kind: 'snippet' },
-      { label: '\\sum_{i=1}^{n}', insertText: 'sum_{i=1}^{n} ', detail: 'Summation operator', kind: 'snippet' },
-      { label: '\\int_{a}^{b}', insertText: 'int_{a}^{b} ', detail: 'Definite integral', kind: 'snippet' },
-      { label: '\\mathcal{O}(N)', insertText: 'mathcal{O}()', detail: 'Asymptotic Big-O notation', kind: 'snippet' },
-      { label: '\\mathbb{R}', insertText: 'mathbb{R}', detail: 'Blackboard bold Real numbers', kind: 'snippet' },
+      { label: '\\frac{a}{b}', insertText: 'frac{a}{b}', detail: 'Fraction', kind: 'math' },
+      { label: '\\sqrt{x}', insertText: 'sqrt{x}', detail: 'Square root', kind: 'math' },
+      { label: '\\sum_{i=1}^{N}', insertText: 'sum_{i=1}^{N} ', detail: 'Summation operator', kind: 'math' },
+      { label: '\\int_{a}^{b}', insertText: 'int_{a}^{b} ', detail: 'Definite integral', kind: 'math' },
+      { label: '\\prod_{i=1}^{N}', insertText: 'prod_{i=1}^{N} ', detail: 'Product operator', kind: 'math' },
+      { label: '\\partial', insertText: 'partial ', detail: 'Partial derivative symbol ∂', kind: 'math' },
+      { label: '\\nabla', insertText: 'nabla ', detail: 'Gradient / Nabla operator ∇', kind: 'math' },
+      { label: '\\infty', insertText: 'infty ', detail: 'Infinity symbol ∞', kind: 'math' },
+      { label: '\\mathcal{O}(N)', insertText: 'mathcal{O}(N)', detail: 'Calligraphic Big-O notation', kind: 'math' },
+      { label: '\\mathbb{R}', insertText: 'mathbb{R}', detail: 'Blackboard bold Real numbers ℝ', kind: 'math' },
+      { label: '\\mathbb{E}', insertText: 'mathbb{E}\\left[ X \\right]', detail: 'Expected value operator 𝔼[X]', kind: 'math' },
       {
-        label: '\\bmatrix 3x3',
+        label: '\\bmatrix (3x3)',
         insertText: 'begin{bmatrix} a & b & c \\\\ d & e & f \\\\ g & h & i \\end{bmatrix}',
-        detail: '3x3 Bracketed Matrix',
-        kind: 'snippet',
+        detail: '3×3 Bracketed Matrix',
+        kind: 'math',
       },
+      { label: '\\section{Title}', insertText: 'section{Section Title}\\label{sec:name}', detail: 'Top-level section', kind: 'command' },
+      { label: '\\subsection{Title}', insertText: 'subsection{Subsection Title}', detail: 'Second-level section', kind: 'command' },
+      { label: '\\textbf{text}', insertText: 'textbf{}', detail: 'Bold text formatting', kind: 'command' },
+      { label: '\\textit{text}', insertText: 'textit{}', detail: 'Italic text formatting', kind: 'command' },
+      { label: '\\cite{key}', insertText: 'cite{', detail: 'Insert bibliography citation', kind: 'citation' },
+      { label: '\\eqref{label}', insertText: 'eqref{', detail: 'Insert parenthesized equation ref', kind: 'reference' },
     ];
 
     const customMacroItems: AutocompleteItem[] = Object.entries(macros).map(([name, meta]) => ({
       label: `\\${name}`,
       insertText: meta.args > 0 ? `${name}{}` : name,
-      detail: `Custom Macro (${meta.args} args) → ${meta.body}`,
+      detail: `Preamble Macro (${meta.args} arg)`,
+      documentation: `Expands to: ${meta.body}`,
       kind: 'macro',
     }));
 
@@ -352,7 +339,7 @@ export function getDeterministicCompletions(
       item.label.toLowerCase().includes(query)
     );
     if (items.length > 0) {
-      return { trigger: cmdMatch[1], items };
+      return { trigger: cmdMatch[1], items: items.slice(0, 10) };
     }
   }
 

@@ -76,6 +76,7 @@ export function compileVeriTeXWorkspace(
       macros,
       compileTimeMs: 0,
       outline,
+      wordCount: 0,
     };
   }
 
@@ -119,6 +120,15 @@ export function compileVeriTeXWorkspace(
 
   const assembledSource = resolveInputs(rootFile.content, rootFile.path);
   const rawLines = stripCommentsKeepLines(rootFile.content).split('\n');
+
+  // Count academic words
+  const plainWords = assembledSource
+    .replace(/\\[a-zA-Z]+(\{[^}]*\})?/g, ' ')
+    .replace(/[^a-zA-Z0-9\s]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+
 
   // 2. Structural Syntax & Environment Stack Validation
   const envStack: Array<{ name: string; line: number }> = [];
@@ -600,5 +610,6 @@ export function compileVeriTeXWorkspace(
     macros,
     compileTimeMs,
     outline,
+    wordCount: plainWords,
   };
 }

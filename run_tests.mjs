@@ -166,12 +166,50 @@ assert(compRefs && compRefs.items.length === 1 && compRefs.items[0].label === 'e
 const compEnv = getDeterministicCompletions('\\begin{al', {}, {}, {});
 assert(compEnv && compEnv.items.some(i => i.label === '\\begin{align}'), 'Test 8b: \\begin{al autocomplete');
 
-// TEST 9: Full Default Initial Project Compilation
-import('./dist_test/src/app/page.jsx').then(() => {
-  console.log('\n[INFO] page.jsx import check passed.');
-}).catch(err => {
-  // It's a React client component, may need DOM if fully rendered, but module loading succeeds
+// TEST 10: Syntax Highlighter tokenization
+import { highlightLatexSyntax, detectActiveMathAtCursor } from './dist_test/src/lib/latex-ide-engine.js';
+
+const sampleTex = `\\section{Methods}
+\\begin{equation}
+  E = mc^2 % mass energy
+\\end{equation}
+$a + b$`;
+
+const highlighted = highlightLatexSyntax(sampleTex, 'tex');
+assert(highlighted.includes('tok-section'), 'Test 10a: \\section tokenized with tok-section');
+assert(highlighted.includes('tok-env-cmd'), 'Test 10b: \\begin tokenized with tok-env-cmd');
+assert(highlighted.includes('tok-env-name'), 'Test 10c: equation tokenized with tok-env-name');
+assert(highlighted.includes('tok-math'), 'Test 10d: $a + b$ tokenized with tok-math');
+assert(highlighted.includes('tok-comment'), 'Test 10e: % comment tokenized with tok-comment');
+
+// TEST 11: Active Math Inspector detection
+const mathSample = `Before math.
+\\begin{equation}
+  \\label{eq:grav}
+  F = G \\frac{m_1 m_2}{r^2}
+\\end{equation}
+After math. Here is inline $x^2 + y^2 = 1$ in sentence.`;
+
+const cursorInsideEq = mathSample.indexOf('m_1');
+const detectedEq = detectActiveMathAtCursor(mathSample, cursorInsideEq);
+assert(detectedEq && detectedEq.includes('F = G'), 'Test 11a: Equation environment math detected at cursor');
+
+const cursorInsideInline = mathSample.indexOf('x^2');
+const detectedInline = detectActiveMathAtCursor(mathSample, cursorInsideInline);
+assert(detectedInline && detectedInline.includes('x^2 + y^2 = 1'), 'Test 11b: Inline math $...$ detected at cursor');
+
+// TEST 12: Autocomplete kinds and custom macros
+const compMath = getDeterministicCompletions('\\fr', {}, {}, {});
+assert(compMath && compMath.items.some(i => i.label === '\\frac{a}{b}' && i.kind === 'math'), 'Test 12a: \\frac autocomplete with kind math');
+
+const compMacro = getDeterministicCompletions('\\custom', {}, {}, {
+  customOp: { args: 1, body: '\\operatorname{custom}' }
 });
+assert(compMacro && compMacro.items.some(i => i.label === '\\customOp' && i.kind === 'macro'), 'Test 12b: Custom macro autocomplete with kind macro');
+
+// TEST 13: Academic word count computation
+assert(res1.wordCount > 0, 'Test 13a: Academic word count is computed');
+assert(typeof res1.wordCount === 'number', 'Test 13b: Word count is a number');
 
 console.log(`\n=== TEST SUITE SUMMARY: ${passed} Passed, ${failed} Failed ===`);
 if (failed > 0) {
@@ -179,3 +217,4 @@ if (failed > 0) {
 } else {
   console.log('ALL TESTS PASSED WITH ZERO ERRORS.\n');
 }
+
