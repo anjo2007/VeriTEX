@@ -45,6 +45,8 @@ export function parseWorkspaceBibFiles(files: Record<string, VirtualFile>): Reco
 /**
  * Compiles the multi-file LaTeX workspace in <12ms using atomic block tokenization,
  * cross-reference indexing, custom macro expansion, and strict KaTeX validation.
+ * Supports multi-page pagination, two-column layouts, inline thebibliography,
+ * figures, algorithms, footnotes, and arbitrary custom environments.
  */
 export function compileVeriTeXWorkspace(
   files: Record<string, VirtualFile>,
@@ -60,7 +62,7 @@ export function compileVeriTeXWorkspace(
   const rootFile = files[rootFilePath] || Object.values(files).find((f) => f.type === 'tex');
   if (!rootFile) {
     return {
-      html: '<div class="p-8 text-red-500">No .tex source file found in workspace.</div>',
+      html: '<div class="p-8 text-red-500 font-mono text-sm">No .tex source file found in workspace.</div>',
       diagnostics: [
         {
           line: 1,
@@ -80,6 +82,7 @@ export function compileVeriTeXWorkspace(
     };
   }
 
+  // Parse external .bib entries
   const bibEntries = parseWorkspaceBibFiles(files);
 
   // 1. Strip comments while preserving line counts and resolve \input{...}
@@ -121,6 +124,15 @@ export function compileVeriTeXWorkspace(
   const assembledSource = resolveInputs(rootFile.content, rootFile.path);
   const rawLines = stripCommentsKeepLines(rootFile.content).split('\n');
 
+  // Document class & layout configuration
+  const docClassMatch = assembledSource.match(/\\documentclass(?:\[([^\]]*)\])?\{([^}]+)\}/);
+  const docClassOptions = docClassMatch?.[1] || '';
+  const docClassName = docClassMatch?.[2]?.trim() || 'article';
+  const isTwoColumn =
+    docClassOptions.includes('twocolumn') ||
+    docClassName === 'IEEEtran' ||
+    assembledSource.includes('\\twocolumn');
+
   // Count academic words
   const plainWords = assembledSource
     .replace(/\\[a-zA-Z]+(\{[^}]*\})?/g, ' ')
@@ -128,7 +140,6 @@ export function compileVeriTeXWorkspace(
     .trim()
     .split(/\s+/)
     .filter(Boolean).length;
-
 
   // 2. Structural Syntax & Environment Stack Validation
   const envStack: Array<{ name: string; line: number }> = [];
@@ -182,6 +193,7 @@ export function compileVeriTeXWorkspace(
   });
 
   envStack.forEach((unclosed) => {
+    if (unclosed.name === 'document') return;
     diagnostics.push({
       line: unclosed.line,
       file: rootFile.path,
@@ -214,7 +226,7 @@ export function compileVeriTeXWorkspace(
     katexMacros[`\\${name}`] = `${star}{${body}}`;
   }
 
-  // 4. Extract Metadata (\title, \author, \date)
+  // 4. Extract Metadata (\title, \author, \date, \thanks)
   const extractBracedMeta = (cmd: string): string => {
     const regex = new RegExp(`\\\\${cmd}\\{((?:[^{}]|\\{[^{}]*\\})*)\\}`);
     return assembledSource.match(regex)?.[1]?.trim() || '';
@@ -229,6 +241,28 @@ export function compileVeriTeXWorkspace(
   const docEnd = body.indexOf('\\end{document}');
   if (docStart !== -1) {
     body = body.slice(docStart + '\\begin{document}'.length, docEnd !== -1 ? docEnd : undefined);
+  }
+
+  // Parse inline \begin{thebibliography}{...} \bibitem{...}
+  const inlineBibRegex = /\\begin\{thebibliography\}(?:\{[^}]*\})?([\s\S]*?)\\end\{thebibliography\}/;
+  const inlineBibMatch = body.match(inlineBibRegex);
+  if (inlineBibMatch) {
+    const bibContent = inlineBibMatch[1];
+    const bibItemRegex = /\\bibitem(?:\[([^\]]*)\])?\{([^}]+)\}([\s\S]*?)(?=\\bibitem|$)/g;
+    let bMatch: RegExpExecArray | null;
+    while ((bMatch = bibItemRegex.exec(bibContent)) !== null) {
+      const bKey = bMatch[2].trim();
+      const bText = bMatch[3].trim().replace(/\s+/g, ' ');
+      if (!bibEntries[bKey]) {
+        bibEntries[bKey] = {
+          key: bKey,
+          type: 'article',
+          title: bText,
+          author: bText.split('.')[0] || 'Author',
+          year: bText.match(/\b(19\d\d|20\d\d)\b/)?.[1] || 'n.d.',
+        };
+      }
+    }
   }
 
   // Tokenize atomic blocks and math expressions so paragraph splitting never corrupts DOM
@@ -262,18 +296,40 @@ export function compileVeriTeXWorkspace(
     }
   };
 
+  // Footnotes collection
+  const footnotes: string[] = [];
+  body = body.replace(/\\footnote\{((?:[^{}]|\{[^{}]*\})*)\}/g, (_, noteText) => {
+    const fnNum = footnotes.length + 1;
+    footnotes.push(formatInlineConstructs(noteText.trim()));
+    return `<sup class="veritex-footnote-marker text-[10px] text-emerald-700 dark:text-emerald-400 font-bold cursor-pointer select-none" title="Footnote ${fnNum}">[${fnNum}]</sup>`;
+  });
+
+  // Page Breaks (\newpage, \clearpage, \pagebreak)
+  body = body.replace(/\\(?:newpage|clearpage|pagebreak)/g, () => {
+    return pushBlockToken(
+      `<div class="veritex-page-break my-8 flex items-center justify-center [break-before:page] [page-break-before:always] select-none">
+        <div class="w-full border-t-2 border-dashed border-zinc-300 dark:border-zinc-700 relative text-center">
+          <span class="inline-block relative -top-3 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 px-3 py-0.5 rounded-full text-[10px] font-mono tracking-widest text-zinc-500 uppercase">
+            Page Break
+          </span>
+        </div>
+      </div>`
+    );
+  });
+
   // Counters for numbering and labels
   let eqCounter = 0;
   let thmCounter = 0;
   let figCounter = 0;
   let tabCounter = 0;
   let algCounter = 0;
+  let chapCounter = 0;
   let secCounter = 0;
   let subSecCounter = 0;
 
-  // 5. Process Numbered & Unnumbered Display Equations first
+  // 5. Process Numbered & Unnumbered Display Equations
   body = body.replace(
-    /\\begin\{(equation\*?|align\*?|gather\*?)\}([\s\S]*?)\\end\{\1\}/g,
+    /\\begin\{(equation\*?|align\*?|gather\*?|multline\*?)\}([\s\S]*?)\\end\{\1\}/g,
     (_, envName: string, content: string) => {
       const isStarred = envName.endsWith('*');
       let eqNumHtml = '';
@@ -293,11 +349,11 @@ export function compileVeriTeXWorkspace(
             file: rootFile.path,
           };
         }
-        eqNumHtml = `<span class="veritex-eq-num">(${numStr})</span>`;
+        eqNumHtml = `<span class="veritex-eq-num text-xs font-serif text-zinc-500 dark:text-zinc-400 select-none">(${numStr})</span>`;
       }
 
       const wrappedMath =
-        envName.startsWith('align') || envName.startsWith('gather')
+        envName.startsWith('align') || envName.startsWith('gather') || envName.startsWith('multline')
           ? `\\begin{aligned}${cleanMath}\\end{aligned}`
           : cleanMath;
 
@@ -326,13 +382,13 @@ export function compileVeriTeXWorkspace(
   // 6. Process Abstract
   body = body.replace(/\\begin\{abstract\}([\s\S]*?)\\end\{abstract\}/g, (_, content: string) => {
     return pushBlockToken(
-      `<div class="veritex-abstract my-6 mx-auto max-w-[90%] text-sm leading-relaxed"><div class="text-center font-bold uppercase tracking-wider text-xs mb-2">Abstract</div><div>${formatInlineConstructs(content.trim())}</div></div>`
+      `<div class="veritex-abstract my-6 mx-auto max-w-[92%] text-[13.5px] leading-relaxed border-t border-b border-zinc-200 dark:border-zinc-800 py-4"><div class="text-center font-bold uppercase tracking-wider text-xs mb-2 text-zinc-800 dark:text-zinc-200">Abstract</div><div class="italic text-justify">${formatInlineConstructs(content.trim())}</div></div>`
     );
   });
 
   // 7. Process Theorems, Lemmas, Propositions, Definitions & Proofs
   body = body.replace(
-    /\\begin\{(theorem|lemma|proposition|corollary|definition)\}(?:\[([^\]]*)\])?([\s\S]*?)\\end\{\1\}/g,
+    /\\begin\{(theorem|lemma|proposition|corollary|definition|conjecture|remark|example)\}(?:\[([^\]]*)\])?([\s\S]*?)\\end\{\1\}/g,
     (_, envType: string, optTitle: string, content: string) => {
       thmCounter++;
       const numStr = String(thmCounter);
@@ -349,18 +405,18 @@ export function compileVeriTeXWorkspace(
       const titleCap = envType.charAt(0).toUpperCase() + envType.slice(1);
       const header = `${titleCap} ${numStr}${optTitle ? ` (${optTitle})` : ''}.`;
       return pushBlockToken(
-        `<div class="veritex-theorem my-4 p-3.5 rounded border-l-4"><span class="font-bold not-italic mr-1.5">${header}</span><span class="italic">${formatInlineConstructs(cleanBody)}</span></div>`
+        `<div class="veritex-theorem my-4 p-3.5 rounded border-l-4 border-emerald-600 bg-emerald-50/50 dark:bg-emerald-950/20 text-[14px] leading-relaxed"><span class="font-bold not-italic mr-1.5 text-zinc-900 dark:text-zinc-100">${header}</span><span class="italic text-zinc-800 dark:text-zinc-200">${formatInlineConstructs(cleanBody)}</span></div>`
       );
     }
   );
 
   body = body.replace(/\\begin\{proof\}([\s\S]*?)\\end\{proof\}/g, (_, content: string) => {
     return pushBlockToken(
-      `<div class="veritex-proof my-3 text-sm leading-relaxed"><span class="italic font-semibold mr-1.5">Proof.</span><span>${formatInlineConstructs(content.trim())}</span><span class="float-right font-serif">◻</span></div>`
+      `<div class="veritex-proof my-3 text-[14px] leading-relaxed text-zinc-800 dark:text-zinc-200"><span class="italic font-semibold mr-1.5">Proof.</span><span>${formatInlineConstructs(content.trim())}</span><span class="float-right font-serif select-none">◻</span></div>`
     );
   });
 
-  // 8. Process Booktabs Tables
+  // 8. Process Booktabs & Tabular Tables
   body = body.replace(/\\begin\{table\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{table\}/g, (_, content: string) => {
     tabCounter++;
     const numStr = String(tabCounter);
@@ -383,23 +439,58 @@ export function compileVeriTeXWorkspace(
         .map((row, rIdx) => {
           const cells = row.split('&').map((c) => formatInlineConstructs(c.trim()));
           const tag = rIdx === 0 ? 'th' : 'td';
-          return `<tr class="${rIdx === 0 ? 'border-b-2 font-semibold' : 'border-b'}">${cells
-            .map((c) => `<${tag} class="px-3 py-2 text-center">${c}</${tag}>`)
+          return `<tr class="${rIdx === 0 ? 'border-b-2 border-zinc-900 dark:border-zinc-100 font-semibold text-zinc-900 dark:text-zinc-100' : 'border-b border-zinc-200 dark:border-zinc-800 text-zinc-800 dark:text-zinc-200'}">${cells
+            .map((c) => `<${tag} class="px-3.5 py-2 text-center text-xs">${c}</${tag}>`)
             .join('')}</tr>`;
         })
         .join('');
 
-      tabularHtml = `<div class="overflow-x-auto"><table class="veritex-table mx-auto my-2 text-sm border-t-2 border-b-2">${rowsHtml}</table></div>`;
+      tabularHtml = `<div class="overflow-x-auto"><table class="veritex-table mx-auto my-2 border-t-2 border-b-2 border-zinc-900 dark:border-zinc-100">${rowsHtml}</table></div>`;
     }
 
     const captionHtml = captionMatch
-      ? `<div class="text-xs text-center mb-2"><span class="font-bold">Table ${numStr}:</span> ${formatInlineConstructs(captionMatch[1])}</div>`
+      ? `<div class="text-xs text-center mb-2 text-zinc-700 dark:text-zinc-300"><span class="font-bold">Table ${numStr}:</span> ${formatInlineConstructs(captionMatch[1])}</div>`
       : '';
 
     return pushBlockToken(`<figure class="my-6">${captionHtml}${tabularHtml}</figure>`);
   });
 
-  // 9. Process Algorithms
+  // 9. Process Figures & Includegraphics
+  body = body.replace(/\\begin\{figure\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{figure\}/g, (_, content: string) => {
+    figCounter++;
+    const numStr = String(figCounter);
+    const captionMatch = content.match(/\\caption\{((?:[^{}]|\{[^{}]*\})*)\}/);
+    const labelMatch = content.match(/\\label\{([^}]+)\}/);
+    if (labelMatch) {
+      labels[labelMatch[1].trim()] = { number: numStr, type: 'figure', line: 1, file: rootFile.path };
+    }
+
+    const imgMatch = content.match(/\\includegraphics(?:\[([^\]]*)\])?\{([^}]+)\}/);
+    let imgHtml = '';
+    if (imgMatch) {
+      const src = imgMatch[2].trim();
+      const isHttp = /^https?:\/\//i.test(src) || /^data:/i.test(src);
+      if (isHttp) {
+        imgHtml = `<img src="${src}" alt="Figure ${numStr}" class="max-h-72 max-w-full mx-auto rounded shadow-sm object-contain" />`;
+      } else {
+        imgHtml = `
+          <div class="w-full max-w-md mx-auto h-44 rounded border-2 border-dashed border-zinc-300 dark:border-zinc-700 flex flex-col items-center justify-center p-4 bg-zinc-50/50 dark:bg-zinc-900/50 text-zinc-400">
+            <svg class="w-8 h-8 mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+            <span class="text-xs font-mono font-medium">${src}</span>
+            <span class="text-[10px] text-zinc-500 mt-1">LaTeX Vector Graphic / Image Placeholder</span>
+          </div>
+        `;
+      }
+    }
+
+    const captionHtml = captionMatch
+      ? `<figcaption class="text-xs text-center mt-2.5 text-zinc-700 dark:text-zinc-300"><span class="font-bold">Figure ${numStr}:</span> ${formatInlineConstructs(captionMatch[1])}</figcaption>`
+      : '';
+
+    return pushBlockToken(`<figure class="my-6 text-center">${imgHtml}${captionHtml}</figure>`);
+  });
+
+  // 10. Process Algorithms
   body = body.replace(/\\begin\{algorithm\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{algorithm\}/g, (_, content: string) => {
     algCounter++;
     const numStr = String(algCounter);
@@ -424,24 +515,72 @@ export function compileVeriTeXWorkspace(
       .join('');
 
     return pushBlockToken(
-      `<div class="veritex-algorithm my-5 border-t-2 border-b-2 py-2.5 px-3"><div class="text-xs font-bold border-b pb-1.5 mb-2">Algorithm ${numStr}: ${captionMatch ? formatInlineConstructs(captionMatch[1]) : 'Procedure'}</div>${algLines}</div>`
+      `<div class="veritex-algorithm my-5 border-t-2 border-b-2 border-zinc-900 dark:border-zinc-100 py-2.5 px-3 bg-zinc-50/30 dark:bg-zinc-900/20"><div class="text-xs font-bold border-b border-zinc-200 dark:border-zinc-800 pb-1.5 mb-2">Algorithm ${numStr}: ${captionMatch ? formatInlineConstructs(captionMatch[1]) : 'Procedure'}</div>${algLines}</div>`
     );
   });
 
-  // 10. Process Itemize & Enumerate Lists
-  body = body.replace(/\\begin\{(itemize|enumerate)\}([\s\S]*?)\\end\{\1\}/g, (_, listType: string, content: string) => {
-    const tag = listType === 'enumerate' ? 'ol' : 'ul';
-    const listClass = listType === 'enumerate' ? 'list-decimal' : 'list-disc';
+  // 11. Process Itemize, Enumerate & Description Lists
+  body = body.replace(/\\begin\{(itemize|enumerate|description)\}([\s\S]*?)\\end\{\1\}/g, (_, listType: string, content: string) => {
+    const tag = listType === 'enumerate' ? 'ol' : listType === 'description' ? 'dl' : 'ul';
+    const listClass = listType === 'enumerate' ? 'list-decimal pl-6' : listType === 'description' ? 'pl-2' : 'list-disc pl-6';
     const items = content
       .split('\\item')
       .map((i) => i.trim())
       .filter(Boolean)
-      .map((i) => `<li class="my-1">${formatInlineConstructs(i)}</li>`)
+      .map((i) => {
+        const descMatch = i.match(/^\[([^\]]+)\]([\s\S]*)/);
+        if (descMatch) {
+          return `<dt class="font-bold text-xs mt-2">${formatInlineConstructs(descMatch[1])}</dt><dd class="ml-4 text-xs">${formatInlineConstructs(descMatch[2])}</dd>`;
+        }
+        return `<li class="my-1 text-[14px]">${formatInlineConstructs(i)}</li>`;
+      })
       .join('');
-    return pushBlockToken(`<${tag} class="${listClass} pl-6 my-3 text-sm space-y-1">${items}</${tag}>`);
+    return pushBlockToken(`<${tag} class="${listClass} my-3 text-sm space-y-1">${items}</${tag}>`);
   });
 
-  // 11. Process Sections, Subsections & Outline with Line Numbers
+  // 12. Process Alignment & Formatting Environments (center, quote, verbatim)
+  body = body.replace(/\\begin\{center\}([\s\S]*?)\\end\{center\}/g, (_, c) => {
+    return pushBlockToken(`<div class="text-center my-3">${formatInlineConstructs(c.trim())}</div>`);
+  });
+
+  body = body.replace(/\\begin\{(quote|quotation)\}([\s\S]*?)\\end\{\1\}/g, (_, __, c) => {
+    return pushBlockToken(`<blockquote class="italic border-l-4 border-zinc-400 dark:border-zinc-600 pl-4 my-3 text-sm text-zinc-700 dark:text-zinc-300">${formatInlineConstructs(c.trim())}</blockquote>`);
+  });
+
+  body = body.replace(/\\begin\{verbatim\}([\s\S]*?)\\end\{verbatim\}/g, (_, c) => {
+    return pushBlockToken(`<pre class="bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-3 rounded font-mono text-xs overflow-x-auto my-3 text-zinc-800 dark:text-zinc-200"><code>${escapeHtml(c)}</code></pre>`);
+  });
+
+  // 13. Process Chapters (\chapter for report & book)
+  body = body.replace(
+    /\\chapter\*?\{((?:[^{}]|\{[^{}]*\})*)\}(?:\s*\\label\{([^}]+)\})?/g,
+    (_, rawTitle: string, optLabel?: string) => {
+      chapCounter++;
+      secCounter = 0;
+      subSecCounter = 0;
+      const numPrefix = `${chapCounter}`;
+
+      if (optLabel) {
+        labels[optLabel.trim()] = { number: numPrefix, type: 'chapter', line: 1, file: rootFile.path };
+      }
+
+      outline.push({
+        level: 1,
+        title: rawTitle.replace(/\\[a-zA-Z]+/g, '').trim(),
+        line: 1,
+        number: `Chapter ${numPrefix}`,
+      });
+
+      return pushBlockToken(
+        `<div class="veritex-chapter text-center my-8 pt-6 border-t-2 border-zinc-900 dark:border-zinc-100">
+          <div class="text-xs uppercase tracking-widest font-mono text-zinc-500 mb-1">Chapter ${numPrefix}</div>
+          <h1 class="text-2xl font-bold font-serif text-zinc-900 dark:text-zinc-100">${formatInlineConstructs(rawTitle)}</h1>
+        </div>`
+      );
+    }
+  );
+
+  // 14. Process Sections, Subsections & Paragraphs with Line Numbers
   body = body.replace(
     /\\(section|subsection|subsubsection)(\*?)\{((?:[^{}]|\{[^{}]*\})*)\}(?:\s*\\label\{([^}]+)\})?/g,
     (_, levelName: string, star: string, rawTitle: string, optLabel?: string) => {
@@ -454,13 +593,13 @@ export function compileVeriTeXWorkspace(
         if (!isStar) {
           secCounter++;
           subSecCounter = 0;
-          numPrefix = `${secCounter}`;
+          numPrefix = chapCounter > 0 ? `${chapCounter}.${secCounter}` : `${secCounter}`;
         }
       } else if (levelName === 'subsection') {
         level = 2;
         if (!isStar) {
           subSecCounter++;
-          numPrefix = `${secCounter}.${subSecCounter}`;
+          numPrefix = chapCounter > 0 ? `${chapCounter}.${secCounter}.${subSecCounter}` : `${secCounter}.${subSecCounter}`;
         }
       } else {
         level = 3;
@@ -483,10 +622,10 @@ export function compileVeriTeXWorkspace(
 
       const sizeClass =
         level === 1
-          ? 'text-lg font-bold mt-7 mb-2.5 border-b pb-1'
+          ? 'text-lg font-bold font-serif mt-7 mb-2.5 border-b border-zinc-200 dark:border-zinc-800 pb-1 text-zinc-900 dark:text-zinc-100'
           : level === 2
-          ? 'text-base font-bold mt-5 mb-2'
-          : 'text-sm font-semibold mt-4 mb-1';
+          ? 'text-base font-bold font-serif mt-5 mb-2 text-zinc-900 dark:text-zinc-100'
+          : 'text-sm font-semibold font-serif mt-4 mb-1 text-zinc-900 dark:text-zinc-100';
 
       return pushBlockToken(
         `<h${level + 1} data-source-line="${lineNum}" class="veritex-heading ${sizeClass} cursor-pointer">${
@@ -496,22 +635,60 @@ export function compileVeriTeXWorkspace(
     }
   );
 
-  // 12. Format inline LaTeX commands (\textbf, \textit, \texttt)
+  // Paragraph & subparagraph commands
+  body = body.replace(/\\paragraph\*?\{((?:[^{}]|\{[^{}]*\})*)\}/g, (_, t) => {
+    return `<div class="font-bold text-sm inline-block mr-2 mt-3 text-zinc-900 dark:text-zinc-100">${formatInlineConstructs(t)}</div>`;
+  });
+
+  // Generic custom environments fallback
+  body = body.replace(
+    /\\begin\{([a-zA-Z0-9*]+)\}(?:\[([^\]]*)\])?([\s\S]*?)\\end\{\1\}/g,
+    (_, envName: string, optHeader: string, envBody: string) => {
+      // If recognized standard environments that were already parsed, skip
+      if (/^(document|table|figure|equation|align|gather|theorem|lemma|proof|algorithm|itemize|enumerate|abstract|center|quote|verbatim)$/i.test(envName)) {
+        return envBody;
+      }
+      return pushBlockToken(
+        `<div class="veritex-generic-env my-4 p-3.5 rounded border border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/30">
+          <div class="text-xs font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 mb-1.5">${envName}${optHeader ? ` (${optHeader})` : ''}</div>
+          <div class="text-sm leading-relaxed">${formatInlineConstructs(envBody.trim())}</div>
+        </div>`
+      );
+    }
+  );
+
+  function escapeHtml(str: string): string {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // 15. Format inline LaTeX formatting commands
   function formatInlineConstructs(str: string): string {
     return str
       .replace(/\\textbf\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<strong>$1</strong>')
       .replace(/\\textit\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<em>$1</em>')
       .replace(/\\emph\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<em>$1</em>')
-      .replace(/\\texttt\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<code class="px-1 py-0.5 rounded text-xs font-mono">$1</code>')
+      .replace(/\\underline\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<span class="underline">$1</span>')
+      .replace(/\\texttt\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<code class="px-1 py-0.5 rounded text-xs font-mono bg-zinc-100 dark:bg-zinc-800">$1</code>')
+      .replace(/\\textsc\{((?:[^{}]|\{[^{}]*\})*)\}/g, '<span class="uppercase text-[0.85em] tracking-wider">$1</span>')
+      .replace(/\\verb\|([^|]+)\|/g, '<code class="px-1 py-0.5 rounded text-xs font-mono bg-zinc-100 dark:bg-zinc-800">$1</code>')
+      .replace(/\\url\{([^}]+)\}/g, '<a href="$1" target="_blank" rel="noreferrer" class="underline text-emerald-600 dark:text-emerald-400 font-mono text-xs">$1</a>')
+      .replace(/\\href\{([^}]+)\}\{([^}]+)\}/g, '<a href="$1" target="_blank" rel="noreferrer" class="underline text-emerald-600 dark:text-emerald-400">$2</a>')
       .replace(/---/g, '&mdash;')
-      .replace(/--/g, '&ndash;');
+      .replace(/--/g, '&ndash;')
+      .replace(/\\&/g, '&amp;')
+      .replace(/\\%/g, '%')
+      .replace(/\\\$/g, '$')
+      .replace(/\\#/g, '#')
+      .replace(/\\_/g, '_')
+      .replace(/\\\\/g, '<br/>');
   }
 
-  // 13. Split remaining text into paragraphs and restore atomic block tokens
+  // 16. Split remaining text into paragraphs and restore atomic block tokens
   let htmlParagraphs = body
     .replace(/\\maketitle/g, '')
     .replace(/\\bibliography\{[^}]+\}/g, '')
     .replace(/\\bibliographystyle\{[^}]+\}/g, '')
+    .replace(/\\begin\{thebibliography\}[\s\S]*?\\end\{thebibliography\}/g, '')
     .split(/\n\s*\n/)
     .map((chunk) => chunk.trim())
     .filter(Boolean)
@@ -519,7 +696,7 @@ export function compileVeriTeXWorkspace(
       if (chunk.startsWith('@@VERITEX_BLOCK_') && chunk.endsWith('@@')) {
         return chunk;
       }
-      return `<p class="my-3 leading-relaxed text-justify text-[15px]">${formatInlineConstructs(chunk)}</p>`;
+      return `<p class="my-3 leading-relaxed text-justify text-[14.5px] font-serif text-zinc-800 dark:text-zinc-200">${formatInlineConstructs(chunk)}</p>`;
     })
     .join('\n');
 
@@ -528,7 +705,7 @@ export function compileVeriTeXWorkspace(
     htmlParagraphs = htmlParagraphs.split(`@@VERITEX_BLOCK_${idx}@@`).join(blockHtml);
   });
 
-  // 14. Resolve \ref, \eqref, and \cite across the ENTIRE assembled HTML
+  // 17. Resolve \ref, \eqref, and \cite across the ENTIRE assembled HTML
   htmlParagraphs = htmlParagraphs.replace(/\\(eq)?ref\{([^}]+)\}/g, (_, isEq, rawKey) => {
     const key = rawKey.trim();
     const found = labels[key];
@@ -543,7 +720,7 @@ export function compileVeriTeXWorkspace(
       return `<span class="text-amber-600 font-bold" title="Unresolved reference: ${key}">[??]</span>`;
     }
     const text = isEq ? `(${found.number})` : found.number;
-    return `<span class="veritex-ref font-medium underline decoration-dotted cursor-pointer" title="${found.type} ${found.number}">${text}</span>`;
+    return `<span class="veritex-ref font-medium text-sky-600 dark:text-sky-400 hover:underline cursor-pointer" title="${found.type} ${found.number}">${text}</span>`;
   });
 
   htmlParagraphs = htmlParagraphs.replace(/\\cite[a-zA-Z]*\{([^}]+)\}/g, (_, rawKeys: string) => {
@@ -554,7 +731,7 @@ export function compileVeriTeXWorkspace(
           line: 1,
           file: rootFile.path,
           severity: 'warning',
-          message: `Citation key "${k}" not found in any .bib file.`,
+          message: `Citation key "${k}" not found in any .bib file or thebibliography environment.`,
           snippet: `\\cite{${k}}`,
         });
         return '?';
@@ -572,37 +749,61 @@ export function compileVeriTeXWorkspace(
     htmlParagraphs = htmlParagraphs.split(`@@VERITEX_INLINE_MATH_${idx}@@`).join(mathHtml);
   });
 
-  // 15. Build Title Header & Bibliography Footer
+  // 18. Build Title Header
   const titleHeaderHtml = docTitle
-    ? `<header class="text-center mb-8 pb-5 border-b"><h1 class="text-2xl font-bold leading-snug mb-3">${formatInlineConstructs(docTitle)}</h1>${
-        docAuthor
-          ? `<div class="text-sm font-medium opacity-85">${docAuthor.replace(/\\and/g, ' &bull; ')}</div>`
-          : ''
-      }<div class="text-xs opacity-60 mt-1">${docDate}</div></header>`
+    ? `<header class="text-center mb-8 pb-5 border-b border-zinc-200 dark:border-zinc-800">
+        <h1 class="text-2xl font-bold font-serif leading-snug mb-3 text-zinc-900 dark:text-zinc-100">${formatInlineConstructs(docTitle)}</h1>
+        ${
+          docAuthor
+            ? `<div class="text-sm font-medium font-serif opacity-90 text-zinc-700 dark:text-zinc-300">${docAuthor.replace(/\\and/g, ' &bull; ')}</div>`
+            : ''
+        }
+        <div class="text-xs opacity-60 mt-1 font-mono text-zinc-500">${docDate}</div>
+      </header>`
     : '';
 
+  // 19. Build Footnotes Section
+  const footnotesHtml =
+    footnotes.length > 0
+      ? `<div class="veritex-footnotes mt-10 pt-3 border-t border-zinc-200 dark:border-zinc-800 text-[11px] font-serif text-zinc-600 dark:text-zinc-400 space-y-1">
+          ${footnotes.map((fn, idx) => `<div><span class="font-bold select-none mr-1.5">[${idx + 1}]</span>${fn}</div>`).join('')}
+        </div>`
+      : '';
+
+  // 20. Build References Bibliography
   const citedEntries = Object.entries(citations).sort((a, b) => a[1] - b[1]);
   const bibliographyHtml =
     citedEntries.length > 0
-      ? `<section class="mt-10 pt-5 border-t"><h2 class="text-base font-bold uppercase tracking-wider mb-3">References</h2><ol class="space-y-2 text-xs leading-relaxed">${citedEntries
-          .map(([key, num]) => {
-            const b = bibEntries[key];
-            if (!b) return '';
-            return `<li class="flex gap-2.5"><span class="font-semibold select-none">[${num}]</span><span>${b.author}. "${b.title}." <em>${
-              b.journal || 'Preprint'
-            }</em> (${b.year}). ${
-              b.doi
-                ? `<a href="https://doi.org/${b.doi}" target="_blank" rel="noreferrer" class="underline text-emerald-600">DOI: ${b.doi}</a>`
-                : ''
-            }</span></li>`;
-          })
-          .join('')}</ol></section>`
+      ? `<section class="mt-10 pt-5 border-t border-zinc-200 dark:border-zinc-800">
+          <h2 class="text-base font-bold font-serif uppercase tracking-wider mb-3 text-zinc-900 dark:text-zinc-100">References</h2>
+          <ol class="space-y-2 text-xs leading-relaxed font-serif text-zinc-800 dark:text-zinc-200">
+            ${citedEntries
+              .map(([key, num]) => {
+                const b = bibEntries[key];
+                if (!b) return '';
+                return `<li class="flex gap-2.5">
+                  <span class="font-semibold select-none text-zinc-500">[${num}]</span>
+                  <span>${b.author}. "${b.title}." <em>${b.journal || 'Preprint'}</em> (${b.year}). ${
+                    b.doi
+                      ? `<a href="https://doi.org/${b.doi}" target="_blank" rel="noreferrer" class="underline text-emerald-600 dark:text-emerald-400">DOI: ${b.doi}</a>`
+                      : ''
+                  }</span>
+                </li>`;
+              })
+              .join('')}
+          </ol>
+        </section>`
       : '';
+
+  // Two-column wrapper if requested in document class
+  const mainContentHtml = isTwoColumn
+    ? `<div class="veritex-twocolumn [column-count:2] [column-gap:2.2rem] [column-rule:1px_solid_rgba(150,150,150,0.2)] text-justify">${htmlParagraphs}</div>`
+    : htmlParagraphs;
 
   const compileTimeMs = Math.max(1, Math.round(performance.now() - t0));
 
   return {
-    html: `${titleHeaderHtml}${htmlParagraphs}${bibliographyHtml}`,
+    html: `${titleHeaderHtml}${mainContentHtml}${footnotesHtml}${bibliographyHtml}`,
     diagnostics,
     labels,
     citations,
